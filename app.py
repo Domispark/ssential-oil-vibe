@@ -54,7 +54,7 @@ if uploaded_files:
             
             with st.spinner('AI 正在分析並填表...'):
                 prompt = """你是一個專業倉管。請精準辨識圖片中的繁體中文名稱與數字。
-                格式：名稱,售價,容量,保存期限(YYYY-MM),批號。
+                格式：名稱,售價,容量,保存期限(YYYY-MM),Batch no.。
                 標籤 '04-28' 請轉為 2028-04。僅回傳文字，並以半角逗號隔開。"""
                 response = model.generate_content([prompt] + imgs)
                 if response.text:
