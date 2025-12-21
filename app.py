@@ -4,22 +4,24 @@ from google.oauth2.service_account import Credentials
 import google.generativeai as genai
 from PIL import Image
 import json
-from datetime import datetime # 引入時間模組
+from datetime import datetime
 
+# 頁面基本設定
 st.set_page_config(page_title="精油倉儲 Vibe", page_icon="🌿")
-st.title("🌿 精油入庫 (相簿優化版)")
+st.title("🌿 精油入庫 (相簿/時間優化版)")
 
-# 1. 讀取 Secrets
+# 1. 初始化 AI
 if "GEMINI_KEY" in st.secrets:
+    # 強制指定版本以避開 v1beta 錯誤
     genai.configure(api_key=st.secrets["GEMINI_KEY"])
 else:
     st.error("❌ 找不到 GEMINI_KEY")
 
 def save_to_sheet(data_list):
     try:
-        # 在資料列表最後方加入目前時間
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        data_list.append(now)
+        # 自動加入更新時間 (F欄位)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        data_list.append(now_str)
         
         scope = ["https://www.googleapis.com/auth/spreadsheets"]
         creds_dict = json.loads(st.secrets["GOOGLE_JSON"])
@@ -32,14 +34,12 @@ def save_to_sheet(data_list):
         st.error(f"寫入表格失敗：{e}")
         return False
 
-# --- 介面優化：確保手機端能開啟相簿 ---
-st.info("💡 點擊下方按鈕可選擇「拍照」或「從相簿選取」照片。")
-# 增加 accept_multiple_files 讓手機觸發多選機制
+# --- 2. 介面優化：強制手機彈出選擇選單 ---
+st.info("💡 點擊下方可「現場拍照」或「從相簿選取」1~2張照片。")
 uploaded_files = st.file_uploader(
-    "選取或拍攝精油照片 (1~2張)", 
+    "選取精油照片 (正面標籤 + 側面日期)", 
     type=['jpg', 'jpeg', 'png'], 
-    accept_multiple_files=True,
-    help="點擊此處開啟系統選單"
+    accept_multiple_files=True
 )
 
 if uploaded_files:
@@ -51,18 +51,18 @@ if uploaded_files:
         cols[i].image(img, use_container_width=True, caption=f"照片 {i+1}")
 
     if st.button("🚀 開始整合辨識"):
+        # 明確指定穩定版模型
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        with st.spinner('AI 正在讀取標籤與批號...'):
+        with st.spinner('AI 正在分析...'):
             try:
-                # 終極提示詞：確保日期與批號精確度
-                prompt = """你是一個精細的倉庫管理員。請從這幾張圖片中提取準確資訊：
+                prompt = """你是一個精密的倉庫管理員。請從圖片中提取資訊：
                 1. 名稱：產品主名稱。
-                2. 售價：金額。
-                3. 容量：ML 數。
-                4. 保存期限：標籤 '04-28' 轉為 2028-04。
-                5. 批號：Batch no. 後方完整字元（如 7-330705）。
-                僅回傳格式：名稱,售價,容量,保存期限,批號 (半角逗號隔開)。"""
+                2. 售價：標籤數字。
+                3. 容量：ML數。
+                4. 保存期限：標籤 '04-28' 代表 2028-04。
+                5. 批號：Batch no. 後方完整字元。
+                格式：名稱,售價,容量,保存期限,批號。僅回傳文字，逗號隔開。"""
                 
                 response = model.generate_content([prompt] + imgs)
                 
@@ -70,17 +70,17 @@ if uploaded_files:
                     result = response.text.strip().split(",")
                     st.session_state.current_result = result
                     
-                    st.subheader("🔍 整合辨識結果")
+                    st.subheader("🔍 整合辨識預覽")
                     st.write(f"**產品：** {result[0]} | **售價：** {result[1]}")
                     st.write(f"**容量：** {result[2]} | **期限：** {result[3]}")
                     st.write(f"**批號：** {result[4]}")
             except Exception as e:
                 st.error(f"辨識發生錯誤：{e}")
 
-# 確認按鈕
+# 確認寫入
 if 'current_result' in st.session_state:
-    if st.button("✅ 確認正確，寫入表格並記錄時間"):
+    if st.button("✅ 確認正確，寫入表格"):
         if save_to_sheet(st.session_state.current_result):
             st.balloons()
-            st.success("成功！更新時間已同步寫入表格。")
+            st.success("成功！資料與時間已同步入庫。")
             del st.session_state.current_result
