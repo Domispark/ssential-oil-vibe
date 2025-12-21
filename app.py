@@ -7,7 +7,7 @@ import json
 from datetime import datetime
 
 st.set_page_config(page_title="精油倉儲 Vibe", page_icon="🌿")
-st.title("🌿 精油入庫 (終極完美版)")
+st.title("🌿 精油入庫 (最終完美版)")
 
 # 1. 初始化 AI
 if "GEMINI_KEY" in st.secrets:
@@ -49,8 +49,8 @@ if uploaded_files:
         cols[i].image(img, use_container_width=True, caption=f"照片 {i+1}")
 
     if st.button("🚀 開始整合辨識"):
-        # 解決 404 問題的關鍵：自動偵測可用模型
         try:
+            # 自動搜尋可用模型以避開 404
             available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
             target_model = available_models[0] if available_models else "gemini-1.5-flash"
             model = genai.GenerativeModel(target_model)
@@ -76,11 +76,11 @@ if uploaded_files:
                     st.write(f"**批號：** {result[4]}")
         except Exception as e:
             st.error(f"辨識發生錯誤：{e}")
-            st.info("提示：若持續出現 404，請確認 API Key 是否已於 AI Studio 啟用。")
 
 # 3. 確認寫入按鈕
 if 'current_result' in st.session_state:
-    if st.button("✅ 確認正確，寫入表格並記錄時間"):
+    if st.button("✅ 確認正確，寫入表格"):
         if save_to_sheet(st.session_state.current_result):
             st.balloons()
-            st.success("
+            st.success("成功！資料與時間已存入 Google Sheets。")
+            del st.session_state.current_result
