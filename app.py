@@ -1,18 +1,68 @@
-if st.button("🚀 啟動深度視覺辨識"):
+import streamlit as st
+import gspread
+from google.oauth2.service_account import Credentials
+import google.generativeai as genai
+from PIL import Image
+import json
+from datetime import datetime
+
+# 頁面基本設定
+st.set_page_config(page_title="精油倉儲 Vibe", page_icon="🌿")
+st.title("🌿 精油入庫 (終極穩定精準版)")
+
+# 1. 安全初始化 AI
+if "GEMINI_KEY" in st.secrets:
+    genai.configure(api_key=st.secrets["GEMINI_KEY"])
+else:
+    st.error("❌ 找不到 GEMINI_KEY，請檢查 Secrets 設定。")
+
+def save_to_sheet(data_list):
+    try:
+        # 自動加入更新時間 (最後一欄)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        data_list.append(now_str)
+        
+        scope = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds_dict = json.loads(st.secrets["GOOGLE_JSON"])
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(st.secrets["SHEET_ID"]).sheet1
+        sheet.append_row(data_list)
+        return True
+    except Exception as e:
+        st.error(f"寫入表格失敗：{e}")
+        return False
+
+# --- 2. 介面設定 ---
+st.info("💡 提示：若辨識不準或額度用盡，您可以直接在下方手動修改資訊後入庫。")
+uploaded_files = st.file_uploader("選取精油照片 (正面標籤 + 側面日期)", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
+
+# 確保暫存區有初始值
+if 'edit_data' not in st.session_state:
+    st.session_state.edit_data = ["", "", "", "", ""]
+
+if uploaded_files:
+    imgs = []
+    cols = st.columns(len(uploaded_files))
+    for i, file in enumerate(uploaded_files):
+        img = Image.open(file)
+        imgs.append(img)
+        cols[i].image(img, use_container_width=True, caption=f"照片 {i+1}")
+
+    if st.button("🚀 啟動深度視覺辨識"):
         try:
-            # 關鍵修正 1：直接指定模型名稱，不要用 list_models() 消耗額度
+            # 強制指定穩定模型，避開 v1beta 錯誤
             model = genai.GenerativeModel('gemini-1.5-flash')
             
-            with st.spinner('正在精準校對繁體中文與代碼...'):
-                prompt = """你是一位極其細心的倉庫管理專家。請徹底掃描圖片中的所有文字資訊，並遵循以下規範：
-                1. **產品名稱**：請精準辨識標籤上的「繁體中文」。特別區分筆畫相近字（例如：是「雲杉」而非「薰香」）。只保留主名稱，去掉無關符號。
-                2. **售價**：標籤上的金額數字。
-                3. **容量**：標籤上的容量。
-                4. **保存期限**：若標籤有 'Sell by date: 04-28'，代表 2028-04。請輸出為 YYYY-MM 格式。
-                5. **Batch no.**：請找出 'Batch no.:' 之後的完整字串，必須包含連字號（例如：7-330705）。
-
-                請嚴格依此順序回傳：名稱,售價,容量,保存期限,Batch no.
-                僅回傳一行結果，中間用半角逗號隔開。"""
+            with st.spinner('正在分析標籤內容...'):
+                prompt = """你是一位精細的倉庫檢驗員。請嚴格辨識標籤上的繁體中文。
+                1. 名稱：請精準讀取最大的品名。不可擅自添加形容詞（例如：看到「絲柏」就只寫「絲柏」，不可加「綠」字）。
+                2. 售價：標籤金額數字。
+                3. 容量：ML 數。
+                4. 保存期限：標籤若有 '04-28' 代表 2028-04。
+                5. Batch no.：請完整找出 Batch no. 後方的字元（包含連字號）。
+                回傳格式：名稱,售價,容量,保存期限,Batch no.
+                僅回傳一行文字，逗號隔開。"""
                 
                 response = model.generate_content([prompt] + imgs)
                 if response.text:
@@ -21,6 +71,24 @@ if st.button("🚀 啟動深度視覺辨識"):
                     st.success("辨識完成！")
         except Exception as e:
             if "429" in str(e):
-                st.error("⚠️ API 額度已達上限或請求太頻繁，請等待約 1 分鐘後再試。")
+                st.warning("⚠️ API 請求太頻繁，請等待 30 秒後再試，或直接手動填寫。")
             else:
                 st.error(f"辨識出錯：{e}")
+
+# --- 3. 穩定手動輸入區 ---
+st.divider()
+st.subheader("📝 入庫資訊檢查與修正")
+f1 = st.text_input("產品名稱", value=st.session_state.edit_data[0])
+f2 = st.text_input("售價", value=st.session_state.edit_data[1])
+f3 = st.text_input("容量", value=st.session_state.edit_data[2])
+f4 = st.text_input("保存期限 (YYYY-MM)", value=st.session_state.edit_data[3])
+f5_val = st.session_state.edit_data[4] if len(st.session_state.edit_data) > 4 else ""
+f5 = st.text_input("Batch no.", value=f5_val)
+
+if st.button("✅ 確認無誤，正式入庫"):
+    final_data = [f1, f2, f3, f4, f5]
+    if any(final_data) and save_to_sheet(final_data):
+        st.balloons()
+        st.success("✅ 存入成功！時間戳記已同步更新。")
+        st.session_state.edit_data = ["", "", "", "", ""]
+        st.rerun()
