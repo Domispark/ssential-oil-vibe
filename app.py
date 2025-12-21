@@ -36,6 +36,10 @@ if img_file:
     img = Image.open(img_file)
     
     # 使用目前最穩定的模型名稱
+    try:
+    model = genai.GenerativeModel('gemini-1.5-flash')
+except:
+    # 如果上面失敗，強迫使用帶有版本號的路徑
     model = genai.GenerativeModel('models/gemini-1.5-flash')
     
     with st.spinner('AI 正在讀取標籤資訊...'):
