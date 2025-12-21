@@ -28,7 +28,7 @@ if img_file:
     img = Image.open(img_file)
     
     # --- 關鍵修正：改用最新的模型名稱 ---
-    model = genai.GenerativeModel('gemini-2.0-flash-exp') # 改用 Gemini 2.0 Flash 或 3 系列通用版
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
     with st.spinner('AI 正在分析...'):
         try:
