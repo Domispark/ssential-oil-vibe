@@ -52,7 +52,7 @@ if uploaded_files:
         with st.spinner(f'正在使用 {target_model} 整合分析中...'):
             try:
                 # 提示詞引導 AI 從多張圖提取資訊
-                prompt = "你是一個精油倉管員。請從這幾張圖片中找出：1.產品名稱 2.售價 3.容量 4.保存期限(YYYY-MM) 5.批號。僅回傳這五項資訊，中間用半角逗號隔開，不要有任何標題或廢話。"
+                prompt = """你是一個專業精油倉管員。請從這幾張圖片中提取資訊。 特別注意：標籤上的 'Sell by date: 04-28' 代表 2028 年 4 月。 請回傳格式：名稱,售價,容量,保存期限(YYYY-MM),批號。 僅回傳這五項資訊，中間用半角逗號隔開。"""
                 response = model.generate_content([prompt] + imgs)
                 
                 if response.text:
