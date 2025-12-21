@@ -26,7 +26,7 @@ img_file = st.camera_input("拍照掃描精油標籤")
 
 if img_file:
     img = Image.open(img_file)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
     
     with st.spinner('AI 正在讀取標籤資訊...'):
         # AI 辨識指令
