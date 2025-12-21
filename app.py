@@ -52,7 +52,7 @@ if uploaded_files:
 
     if st.button("🚀 開始整合辨識"):
         # 明確指定穩定版模型
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        try:     # 嘗試最標準的路徑     model = genai.GenerativeModel('gemini-1.5-flash')     # 測試一下模型是否真的存在     genai.get_model('models/gemini-1.5-flash')  except:     # 如果失敗，強制指定不含 v1beta 的完整路徑     model = genai.GenerativeModel(model_name='models/gemini-1.5-flash')
         
         with st.spinner('AI 正在分析...'):
             try:
