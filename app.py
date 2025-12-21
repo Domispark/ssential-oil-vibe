@@ -69,7 +69,7 @@ name = st.text_input("產品名稱", value=st.session_state.edit_data[0])
 price = st.text_input("售價", value=st.session_state.edit_data[1])
 size = st.text_input("容量", value=st.session_state.edit_data[2])
 expiry = st.text_input("保存期限 (YYYY-MM)", value=st.session_state.edit_data[3])
-batch = st.text_input("批號", value=st.session_state.edit_data[4] if len(st.session_state.edit_data)>4 else "")
+batch = st.text_input("Batcg no.", value=st.session_state.edit_data[4] if len(st.session_state.edit_data)>4 else "")
 
 if st.button("✅ 確認無誤，正式入庫"):
     final_data = [name, price, size, expiry, batch]
