@@ -8,11 +8,11 @@ import json
 st.set_page_config(page_title="精油倉儲 Vibe", page_icon="🌿")
 st.title("🌿 精油入庫自動化")
 
-# 1. 確保 API KEY 正確讀取
+# 1. 讀取 Secrets
 if "GEMINI_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_KEY"])
 else:
-    st.error("請在 Secrets 中設定 GEMINI_KEY")
+    st.error("❌ 找不到 GEMINI_KEY，請檢查 Secrets 設定。")
 
 def save_to_sheet(data_list):
     scope = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -27,34 +27,30 @@ img_file = st.camera_input("拍照掃描精油標籤")
 if img_file:
     img = Image.open(img_file)
     
-    # 嘗試不同的模型名稱，直到成功為止
-    model_names = ['gemini-1.5-flash', 'gemini-1.5-flash-latest']
+    # --- 關鍵修正：改用最新的模型名稱 ---
+    model = genai.GenerativeModel('gemini-2.0-flash-exp') # 改用 Gemini 2.0 Flash 或 3 系列通用版
     
-    with st.spinner('AI 正在讀取標籤資訊...'):
-        success = False
-        for name in model_names:
-            try:
-                model = genai.GenerativeModel(name)
-                response = model.generate_content([
-                    "辨識此精油標籤，僅回傳格式：產品名稱, 售價, 容量, Sell by Date(YYYY-MM), 批號", 
-                    img
-                ])
-                if response.text:
-                    result = response.text.strip().split(",")
-                    st.subheader("🔍 辨識預覽")
-                    st.write(f"**產品：** {result[0]}")
-                    st.write(f"**售價：** {result[1]}")
-                    st.write(f"**容量：** {result[2]}")
-                    st.write(f"**期限：** {result[3]}")
-                    
-                    if st.button("確認無誤，傳送到 Google Sheets"):
-                        save_to_sheet(result)
-                        st.balloons()
-                        st.success("✅ 已同步至雲端表格！")
-                    success = True
-                    break
-            except Exception as e:
-                continue # 嘗試下一個模型名稱
-        
-        if not success:
-            st.error("❌ AI 辨識失敗。請確認 Secrets 中的 GEMINI_KEY 是否為最新複製的金鑰。")
+    with st.spinner('AI 正在分析...'):
+        try:
+            # 傳送圖片給 AI 並明確要求格式
+            response = model.generate_content([
+                "你是專業倉庫員。辨識圖片標籤資訊。格式：名稱,售價,容量,保存期限(YYYY-MM),批號。僅回傳此格式文字，中間用逗號隔開。", 
+                img
+            ])
+            
+            result = response.text.strip().split(",")
+            
+            # 顯示預覽
+            st.success("辨識成功！")
+            st.write(f"**產品：** {result[0]}")
+            st.write(f"**售價：** {result[1]}")
+            st.write(f"**容量：** {result[2]}")
+            st.write(f"**期限：** {result[3]}")
+
+            if st.button("確認並存入 Google 表格"):
+                save_to_sheet(result)
+                st.balloons()
+                st.success("✅ 已儲存至雲端表格！")
+        except Exception as e:
+            st.error(f"分析失敗：{e}")
+            st.info("提示：如果還是出現 404，代表模型權限正在開通，請等待 1 分鐘後 Reboot App。")
