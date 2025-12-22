@@ -149,13 +149,10 @@ def parse_and_clean_data(raw_text):
 # --- 介面設定 ---
 st.sidebar.subheader("⚙️ 系統診斷")
 available_models = get_working_models()
-# 自動選 Pro
-default_index = 0
-for i, m in enumerate(available_models):
-    if "pro" in m:
-        default_index = i
-        break
-selected_model = st.sidebar.selectbox("當前使用模型", available_models, index=default_index)
+
+# 直接讓 default_index = 0，因為我們在 get_working_models 裡已經把 Flash 排在第 0 個了
+# 這樣預設就會是 Flash，不會報錯
+selected_model = st.sidebar.selectbox("當前使用模型", available_models, index=0)
 
 uploaded_files = st.file_uploader("選取照片", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
 
