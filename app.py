@@ -16,7 +16,7 @@ KNOWN_PRODUCTS = [
     "胡椒薄荷-特級",
     "胡椒薄荷-一般",
     "綠薄荷精油",
-    "白雲杉精油",
+    "白雲杉-特級",
     "甜橙精油",
     "薰衣草精油-高地",
     "茶樹精油"
@@ -35,7 +35,7 @@ def get_working_models():
         models.sort(key=lambda x: 'flash' not in x.lower())
         return models
     except Exception:
-        return ["models/gemini-1.5-flash", "models/gemini-2.0-flash-exp", "models/gemini-1.5-pro"]
+        return ["models/gemini-1.5-flash", "models/gemini-2.0-flash-exp"]
 
 def save_to_sheet(data_list):
     try:
@@ -63,25 +63,25 @@ def check_product_name(ai_input_name):
 
 # --- 步驟 2: 通用型資料清洗函式 ---
 def parse_and_clean_data(raw_text):
-    data = ["", "", "", "", ""] # 名稱, 售價, 容量, 效期, Batch
+    data = ["", "", "", "", ""] 
 
-    # 1. 售價
+    # 1. 售價 (針對標籤上的 $ 700)
     price_match = re.search(r'(?:\$|零售價)\s*:?\s*(\d+)', raw_text)
     if price_match:
         data[1] = price_match.group(1)
 
-    # 2. 容量
+    # 2. 容量 (針對標籤上的 6ML)
     vol_match = re.search(r'(\d+)\s*ML', raw_text, re.IGNORECASE)
     if vol_match:
         data[2] = vol_match.group(1)
 
-    # 3. 保存期限 (MM-YY 轉 YYYY-MM)
+    # 3. 保存期限 (針對 04-28 轉成 2028-04)
     date_match = re.search(r'Sell\s*by\s*date\s*[:\s]*(\d{2})[-/](\d{2})', raw_text, re.IGNORECASE)
     if date_match:
         mm, yy = date_match.groups()
         data[3] = f"20{yy}-{mm}"
 
-    # 4. Batch No.
+    # 4. Batch No. (過濾排除製造日期文字)
     batch_patterns = [
         r'Batch\s*no\.?[:\s]*(\d+-\d+)', 
         r'Batch\s*no\.?[:\s]*([A-Z0-9-]+)'
@@ -97,7 +97,7 @@ def parse_and_clean_data(raw_text):
 
 # --- 介面設定 ---
 st.sidebar.subheader("⚙️ 系統診斷")
-# 修正處：確保名稱正確呼叫為 get_working_models()
+# 此處修正原本的 NameError: get_working 修改為 get_working_models()
 available_models = get_working_models()
 selected_model = st.sidebar.selectbox("當前使用模型", available_models, index=0)
 
@@ -115,22 +115,29 @@ if uploaded_files:
             model = genai.GenerativeModel(selected_model)
             with st.spinner('正在解讀標籤...'):
                 prompt = """
-                Please act as an OCR engine. 
-                Task: Read all text from the images.
+                Extract these fields from the images:
+                1. 品名 (Product Name): Only the name (e.g., 白雲杉-特級).
+                2. 售價: The number after "$".
+                3. 容量: The number before "ML".
+                4. 保存期限: MM-YY format after "Sell by date".
+                5. Batch no.: The string after "Batch no.:".
                 
-                Important Guidelines:
-                1. Identify "品名" (Product Name) usually on the first line.
-                2. Find "零售價" or "$" for Price.
-                3. Find "容量" or "ML" for Volume.
-                4. Find "Sell by date" in MM-YY format (e.g., 04-28).
-                5. Find "Batch no." (e.g., 7-330705). IGNORE large barcode numbers.
+                Provide the results in a raw text format.
                 """
                 response = model.generate_content([prompt] + imgs)
                 if response.text:
+                    # 清洗 AI 回傳的標籤文字 (例如把 "**(Product Name):**" 去除)
+                    clean_text = re.sub(r'(\*\*.*?\*\*|:|\(.*\))', '', response.text)
                     cleaned_data = parse_and_clean_data(response.text)
+                    
+                    # 抓取品名
                     name_match = re.search(r'品名[:\s]*([^\n]+)', response.text)
                     if name_match:
                         cleaned_data[0] = name_match.group(1).strip()
+                    else:
+                        # 備案：直接清洗 AI 的第一行
+                        cleaned_data[0] = response.text.split('\n')[0].replace('*', '').replace('品名', '').replace(':', '').strip()
+
                     st.session_state.edit_data = cleaned_data
                     st.success("辨識完成")
         except Exception as e:
@@ -154,23 +161,6 @@ if current_name and not is_known:
                 st.session_state.edit_data[0] = suggestion
                 st.rerun()
 
-if current_date and len(current_date) == 7:
-    try:
-        now_ym = datetime.now().strftime("%Y-%m")
-        if current_date < now_ym:
-            st.error(f"🛑 商品已過期！效期 {current_date} < 當前 {now_ym}")
-    except:
-        pass
-
 f1 = st.text_input("產品名稱", value=st.session_state.edit_data[0])
 f2 = st.text_input("售價", value=st.session_state.edit_data[1])
-f3 = st.text_input("容量", value=st.session_state.edit_data[2])
-f4 = st.text_input("保存期限 (YYYY-MM)", value=st.session_state.edit_data[3])
-f5 = st.text_input("Batch no.", value=st.session_state.edit_data[4])
-
-if st.button("✅ 確認入庫"):
-    if f1 and save_to_sheet([f1, f2, f3, f4, f5]):
-        st.balloons()
-        st.success(f"✅ {f1} 存入成功！")
-        st.session_state.edit_data = ["", "", "", "", ""]
-        st.rerun()
+f3 = st.text_input("容量", value=st.session_state.edit
