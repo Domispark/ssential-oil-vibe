@@ -5,17 +5,21 @@ import google.generativeai as genai
 from PIL import Image
 import json
 from datetime import datetime
-import difflib  # (新增) Python 內建的差異比對工具，不用安裝
+import difflib
+import re # 引入正規表達式套件，用於精準抓取
 
 st.set_page_config(page_title="精油倉儲 Vibe", page_icon="🌿")
-st.title("🌿 精油入庫 (智慧防呆版)")
+st.title("🌿 精油入庫 (強力修正版)")
 
-# --- (新增) 步驟 0: 建立正確的產品資料庫 ---
-# 這是您的「標準答案」。系統會拿 AI 看到的字跟這裡比對。
-# 您可以隨時把正確的產品名稱加進來。
+# --- 步驟 0: 建立正確的產品資料庫 ---
 KNOWN_PRODUCTS = [
     "胡椒薄荷-特級",
-    "白雲杉-特級"
+    "胡椒薄荷-一般",
+    "綠薄荷精油",
+    "白雲杉精油",
+    "甜橙精油",
+    "薰衣草精油-高地",
+    "茶樹精油"
 ]
 
 # 1. 初始化 AI
@@ -48,33 +52,61 @@ def save_to_sheet(data_list):
         st.error(f"寫入表格失敗：{e}")
         return False
 
-# --- (新增) 步驟 1: 建立檢查邏輯函式 ---
+# --- 步驟 1: 建立檢查邏輯函式 ---
 def check_product_name(ai_input_name):
-    """
-    輸入 AI 看到的名稱，回傳 (是否完全正確, 建議名稱)
-    """
     if ai_input_name in KNOWN_PRODUCTS:
         return True, None
-    
-    # 使用 Python 內建的 get_close_matches 找最像的
-    # n=1 表示只找 1 個，cutoff=0.4 表示相似度只要 40% 就抓進來
     matches = difflib.get_close_matches(ai_input_name, KNOWN_PRODUCTS, n=1, cutoff=0.4)
-    
     if matches:
-        return False, matches[0] # 回傳最像的那個
+        return False, matches[0]
     return False, None
 
-# --- 2. 介面設定 ---
+# --- (核心修改) 步驟 2: 強力資料清洗函式 ---
+def parse_and_clean_data(raw_text, ai_list_result):
+    """
+    優先使用 Regex 從原始文字中精準提取，如果抓不到，才退回使用 AI 原本的列表結果。
+    """
+    # 預設使用 AI 的結果
+    final_data = list(ai_list_result)
+    # 確保列表長度足夠
+    while len(final_data) < 5:
+        final_data.append("")
+
+    # --- 1. 強力修正：售價 (尋找 $ 符號後面的數字) ---
+    # pattern: 找 $ 或 售價，後面可能跟著冒號或空白，然後抓取數字
+    price_match = re.search(r'(?:\$|售價)\s*[:.]?\s*(\d{3,})', raw_text)
+    if price_match:
+        # 如果 Regex 抓到了，就覆蓋掉 AI 的結果
+        final_data[1] = price_match.group(1)
+
+    # --- 2. 強力修正：Batch no. (尋找 "Batch no." 後面的特定格式) ---
+    # pattern: 找 Batch no，後面跟著特定格式 (例如 14-開頭)
+    batch_match = re.search(r'Batch\s*no\.?\s*[:.]?\s*([0-9]{2}-[0-9A-Z]+)', raw_text, re.IGNORECASE)
+    if batch_match:
+        final_data[4] = batch_match.group(1)
+
+    # --- 3. 強力修正：保存期限 (處理 MM-YY 格式) ---
+    # pattern: 找 Sell by date，抓取 MM-YY 格式 (例如 04-24)
+    date_match = re.search(r'Sell\s*by\s*date\s*[:.]?\s*(\d{2})[-/](\d{2})', raw_text, re.IGNORECASE)
+    if date_match:
+        month, year_short = date_match.groups()
+        # 假設是 20xx 年，組合成 YYYY-MM
+        final_data[3] = f"20{year_short}-{month}"
+    
+    return final_data
+
+# --- 介面設定 ---
 st.sidebar.subheader("⚙️ 系統診斷")
 available_models = get_working_models()
 selected_model = st.sidebar.selectbox("當前使用模型路徑", available_models)
 
-st.info(f"💡 目前連線路徑：`{selected_model}`")
 uploaded_files = st.file_uploader("選取照片 (建議正面+側面各一張)", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
 
-# 初始化 session state
+# 初始化 session state，多存一個 raw_text
 if 'edit_data' not in st.session_state:
     st.session_state.edit_data = ["", "", "", "", ""]
+if 'raw_ocr_text' not in st.session_state:
+    st.session_state.raw_ocr_text = ""
 
 if uploaded_files:
     imgs = [Image.open(f) for f in uploaded_files]
@@ -84,72 +116,85 @@ if uploaded_files:
         try:
             model = genai.GenerativeModel(selected_model)
             with st.spinner('正在分析標籤細節...'):
-                prompt = """你是一位極度細心的倉管員。請從圖中提取精確資訊：
-                1. **名稱**：標籤第一行「品名:」後的繁體中文。
-                2. **售價**：標籤上的金額數字（只留數字）。
-                3. **容量**：標籤上的 ML 數。
-                4. **保存期限**：尋找 'Sell by date' 或日期，格式轉為 YYYY-MM。
-                5. **Batch no.**：務必尋找 "Batch no.:" 之後的批號。
+                # 更新提示詞，強調關鍵錨點
+                prompt = """你是一位專業的資料擷取員。請讀取圖片中的所有文字，並特別關注以下標籤特徵：
+                1. **名稱**：在「品名:」之後的中文。
+                2. **售價**：緊跟在錢字號「$」後面的數字。
+                3. **容量**：數字後面跟著「ML」。
+                4. **保存期限**：在「Sell by date:」後面的日期 (通常是 MM-YY 格式)。
+                5. **Batch no.**：緊跟在「Batch no.:」後面的編號 (通常是 數字-數字 的格式)。
 
-                僅回傳格式：名稱,售價,容量,保存期限,Batch no.
-                請僅回傳一行文字，逗號隔開。若無資訊則填寫 N/A。"""
+                請先輸出你看到的所有原始文字，然後再以 CSV 格式輸出摘要。
+                摘要格式：名稱,售價,容量,保存期限,Batch no.
+                """
                 
                 response = model.generate_content([prompt] + imgs)
                 if response.text:
-                    # 簡單的清洗
-                    clean_res = response.text.strip().replace("\n", "").replace(" ", "")
-                    # 防止 AI 回傳多餘的 Markdown 符號
-                    clean_res = clean_res.replace("```csv", "").replace("```", "")
+                    st.session_state.raw_ocr_text = response.text # 儲存原始文字以供 Regex 分析
                     
-                    st.session_state.edit_data = clean_res.split(",")
-                    # 若欄位不足 5 個，補齊空字串以免報錯
-                    while len(st.session_state.edit_data) < 5:
-                        st.session_state.edit_data.append("")
+                    # 嘗試找出 AI 生成的 CSV 行
+                    lines = response.text.strip().split('\n')
+                    csv_line = lines[-1] # 通常 AI 會把摘要放在最後一行
+                    
+                    # 初步清洗
+                    clean_res = csv_line.replace(" ", "").replace("```csv", "").replace("```", "")
+                    initial_list = clean_res.split(",")
+                    
+                    # --- 呼叫強力清洗函式 ---
+                    # 傳入原始文字 和 AI初步判斷的列表
+                    cleaned_data = parse_and_clean_data(st.session_state.raw_ocr_text, initial_list)
+                    
+                    st.session_state.edit_data = cleaned_data
                         
-                    st.success("辨識完成！請檢查下方欄位。")
+                    st.success("辨識完成！已套用強力格式修正。")
         except Exception as e:
             st.warning(f"AI 暫時無法辨識：{e}")
 
-# --- 3. 確認與入庫區 (大幅優化) ---
+# --- 確認與入庫區 ---
 st.divider()
 st.subheader("📝 確認入庫資訊")
 
-# 取得目前 session 中的資料
 current_name = st.session_state.edit_data[0]
-current_date = st.session_state.edit_data[3] if len(st.session_state.edit_data) > 3 else ""
+# 確保日期格式正確再進行比較，避免報錯
+current_date = st.session_state.edit_data[3] if len(st.session_state.edit_data) > 3 and len(st.session_state.edit_data[3]) >= 7 else ""
 
-# --- (新增) 智慧提醒區塊 ---
+# --- 智慧提醒區塊 ---
 # 1. 檢查名稱
 is_known, suggestion = check_product_name(current_name)
+final_suggested_name = current_name # 預設為辨識結果
+
 if current_name and not is_known:
     if suggestion:
         st.warning(f"⚠️ 系統辨識為「{current_name}」，庫存清單中找不到。")
-        st.info(f"💡 您是否是指： **{suggestion}** ？")
-        # 讓使用者一鍵修正 (這裡做成提示，使用者手動改即可，避免太複雜)
+        # 提供一個按鈕讓使用者快速採納建議
+        if st.button(f"💡 點此修正為：{suggestion}"):
+             final_suggested_name = suggestion
+             st.session_state.edit_data[0] = suggestion # 更新 session
+             st.rerun() # 重新整理頁面以套用變更
     else:
-        st.error(f"❌ 「{current_name}」不在已知產品清單中，請確認是否為新品或辨識錯誤。")
+        st.error(f"❌ 「{current_name}」不在已知產品清單中。")
 
-# 2. 檢查過期 (簡易版)
-if current_date and len(current_date) >= 7: # 確保有 YYYY-MM
+# 2. 檢查過期
+if current_date:
     try:
-        # 抓取系統現在時間 (YYYY-MM)
         now_ym = datetime.now().strftime("%Y-%m")
         if current_date < now_ym:
             st.error(f"🛑 警告：此商品保存期限 ({current_date}) 已過期！(目前：{now_ym})")
     except:
-        pass # 日期格式如果不對，就跳過檢查不報錯
+        pass
 
 # --- 輸入欄位區 ---
-f1 = st.text_input("產品名稱", value=current_name)
+# 使用 final_suggested_name 來顯示名稱，如果使用者點了建議按鈕，這裡就會自動變更
+f1 = st.text_input("產品名稱", value=st.session_state.edit_data[0])
 f2 = st.text_input("售價", value=st.session_state.edit_data[1] if len(st.session_state.edit_data)>1 else "")
 f3 = st.text_input("容量", value=st.session_state.edit_data[2] if len(st.session_state.edit_data)>2 else "")
-f4 = st.text_input("保存期限 (YYYY-MM)", value=current_date)
+f4 = st.text_input("保存期限 (YYYY-MM)", value=st.session_state.edit_data[3] if len(st.session_state.edit_data)>3 else "")
 f5 = st.text_input("Batch no.", value=st.session_state.edit_data[4] if len(st.session_state.edit_data)>4 else "")
 
 if st.button("✅ 確認正確，正式入庫"):
     if f1 and save_to_sheet([f1, f2, f3, f4, f5]):
         st.balloons()
         st.success(f"✅ {f1} 存入成功！")
-        # 清空
         st.session_state.edit_data = ["", "", "", "", ""]
+        st.session_state.raw_ocr_text = ""
         st.rerun()
