@@ -32,10 +32,12 @@ else:
 def get_working_models():
     try:
         models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        models.sort(key=lambda x: 'pro' not in x.lower()) 
+        # 修改這裡：將 'flash' 排在最前面，因為它免費額度高，不易報錯
+        models.sort(key=lambda x: 'flash' not in x.lower())
         return models
     except Exception:
-        return ["gemini-1.5-pro", "gemini-1.5-flash"]
+        # 如果抓不到清單，預設回傳這兩個，Flash 在前
+        return ["models/gemini-1.5-flash", "models/gemini-2.0-flash-exp", "models/gemini-1.5-pro"]
 
 def save_to_sheet(data_list):
     try:
