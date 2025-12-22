@@ -63,7 +63,7 @@ def check_product_name(ai_input_name):
 
 # --- 步驟 2: 通用型資料清洗函式 ---
 def parse_and_clean_data(raw_text):
-    data = ["", "", "", "", ""] 
+    data = ["", "", "", "", ""] # 名稱, 售價, 容量, 效期, Batch
 
     # 1. 售價
     price_match = re.search(r'(?:\$|零售價)\s*:?\s*(\d+)', raw_text)
@@ -97,4 +97,80 @@ def parse_and_clean_data(raw_text):
 
 # --- 介面設定 ---
 st.sidebar.subheader("⚙️ 系統診斷")
-available_models = get_working
+# 修正處：確保名稱正確呼叫為 get_working_models()
+available_models = get_working_models()
+selected_model = st.sidebar.selectbox("當前使用模型", available_models, index=0)
+
+uploaded_files = st.file_uploader("選取照片", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
+
+if 'edit_data' not in st.session_state:
+    st.session_state.edit_data = ["", "", "", "", ""]
+
+if uploaded_files:
+    imgs = [Image.open(f) for f in uploaded_files]
+    st.image(imgs, width=200)
+
+    if st.button("🚀 啟動 AI 辨識"):
+        try:
+            model = genai.GenerativeModel(selected_model)
+            with st.spinner('正在解讀標籤...'):
+                prompt = """
+                Please act as an OCR engine. 
+                Task: Read all text from the images.
+                
+                Important Guidelines:
+                1. Identify "品名" (Product Name) usually on the first line.
+                2. Find "零售價" or "$" for Price.
+                3. Find "容量" or "ML" for Volume.
+                4. Find "Sell by date" in MM-YY format (e.g., 04-28).
+                5. Find "Batch no." (e.g., 7-330705). IGNORE large barcode numbers.
+                """
+                response = model.generate_content([prompt] + imgs)
+                if response.text:
+                    cleaned_data = parse_and_clean_data(response.text)
+                    name_match = re.search(r'品名[:\s]*([^\n]+)', response.text)
+                    if name_match:
+                        cleaned_data[0] = name_match.group(1).strip()
+                    st.session_state.edit_data = cleaned_data
+                    st.success("辨識完成")
+        except Exception as e:
+            st.warning(f"AI 錯誤：{e}")
+
+# --- 確認與入庫區 ---
+st.divider()
+st.subheader("📝 確認入庫資訊")
+
+current_name = st.session_state.edit_data[0]
+current_date = st.session_state.edit_data[3]
+
+is_known, suggestion = check_product_name(current_name)
+if current_name and not is_known:
+    if suggestion:
+        col_warn, col_btn = st.columns([3, 1])
+        with col_warn:
+            st.warning(f"⚠️ 辨識為「{current_name}」，庫存清單中找不到。")
+        with col_btn:
+            if st.button(f"💡 改為：{suggestion}"):
+                st.session_state.edit_data[0] = suggestion
+                st.rerun()
+
+if current_date and len(current_date) == 7:
+    try:
+        now_ym = datetime.now().strftime("%Y-%m")
+        if current_date < now_ym:
+            st.error(f"🛑 商品已過期！效期 {current_date} < 當前 {now_ym}")
+    except:
+        pass
+
+f1 = st.text_input("產品名稱", value=st.session_state.edit_data[0])
+f2 = st.text_input("售價", value=st.session_state.edit_data[1])
+f3 = st.text_input("容量", value=st.session_state.edit_data[2])
+f4 = st.text_input("保存期限 (YYYY-MM)", value=st.session_state.edit_data[3])
+f5 = st.text_input("Batch no.", value=st.session_state.edit_data[4])
+
+if st.button("✅ 確認入庫"):
+    if f1 and save_to_sheet([f1, f2, f3, f4, f5]):
+        st.balloons()
+        st.success(f"✅ {f1} 存入成功！")
+        st.session_state.edit_data = ["", "", "", "", ""]
+        st.rerun()
