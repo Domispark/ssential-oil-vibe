@@ -14,7 +14,6 @@ st.title("🌿 精油入庫 (強力通用版)")
 # --- 步驟 0: 產品資料庫 ---
 KNOWN_PRODUCTS = [
     "胡椒薄荷-特級",
-    "胡椒薄荷-一般",
     "綠薄荷精油",
     "白雲杉-特級",
     "甜橙精油",
@@ -61,29 +60,30 @@ def check_product_name(ai_input_name):
         return False, matches[0]
     return False, None
 
-# --- 步驟 2: 資料清洗函式 ---
+# --- 步驟 2: 強力資料清洗函式 ---
 def parse_and_clean_data(raw_text):
     data = ["", "", "", "", ""] 
 
-    # 1. 售價 (針對標籤上的 $ 700 或 售價: 700)
-    price_match = re.search(r'(?:\$|售價|零售價)\s*[:：]?\s*(\d[\d\s,]*\d)', raw_text)
+    # 1. 售價 (抓取 $ 符號後，或「售價」後方的純數字)
+    # 解決截圖中掃描不到 $700 的問題
+    price_match = re.search(r'(?:\$|售價|零售價)\s*[:：]?\s*(\d+)', raw_text)
     if price_match:
-        data[1] = re.sub(r'\D', '', price_match.group(1))
+        data[1] = price_match.group(1)
 
-    # 2. 容量 (找 ML 前的數字，或容量字樣後)
-    vol_match = re.search(r'(?:容量|Size)?\s*[:：]?\s*(\d+)\s*(?:ML|ml|毫升)', raw_text, re.IGNORECASE)
-    if not vol_match:
-        vol_match = re.search(r'(\d+)\s*ML', raw_text, re.IGNORECASE)
+    # 2. 容量 (抓取 ML 前方的數字)
+    vol_match = re.search(r'(\d+)\s*ML', raw_text, re.IGNORECASE)
     if vol_match:
         data[2] = vol_match.group(1)
 
-    # 3. 保存期限 (MM-YY 轉 YYYY-MM)
+    # 3. 保存期限 (將 MM-YY 轉為 YYYY-MM，如 04-28 -> 2028-04)
+    # 解決截圖中「保存期限」空白的問題
     date_match = re.search(r'(?:Sell\s*by\s*date|效期|保存期限)\s*[:：]?\s*(\d{2})[-/](\d{2})', raw_text, re.IGNORECASE)
     if date_match:
         mm, yy = date_match.groups()
         data[3] = f"20{yy}-{mm}"
 
-    # 4. Batch No.
+    # 4. Batch No. (優先尋找「Batch no.:」後面的英數組合)
+    # 排除長條碼數字
     batch_match = re.search(r'Batch\s*no\.?\s*[:：]?\s*([A-Z0-9-]+)', raw_text, re.IGNORECASE)
     if batch_match:
         candidate = batch_match.group(1).strip()
@@ -97,7 +97,7 @@ st.sidebar.subheader("⚙️ 系統診斷")
 available_models = get_working_models()
 selected_model = st.sidebar.selectbox("當前使用模型", available_models, index=0)
 
-uploaded_files = st.file_uploader("選取照片 (正面+側面)", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
+uploaded_files = st.file_uploader("選取照片 (建議正面與側面)", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
 
 if 'edit_data' not in st.session_state:
     st.session_state.edit_data = ["", "", "", "", ""]
@@ -109,34 +109,36 @@ if uploaded_files:
     if st.button("🚀 啟動 AI 辨識"):
         try:
             model = genai.GenerativeModel(selected_model)
-            with st.spinner('正在分析標籤細節...'):
-                # 提示詞微調：強化品名位置要求
+            with st.spinner('正在分析標籤特徵...'):
                 prompt = """
-                Strictly extract these fields from the label images:
-                1. 品名 (Name): Find "品名:" and copy the text immediately following it. Must be Traditional Chinese.
-                2. 售價 (Price): The number following "$" or "售價:".
-                3. 容量 (Volume): The number before "ML".
-                4. 保存期限 (Expiry): The MM-YY format after "Sell by date:".
+                Please act as an OCR specialist. Extract exactly these label details:
+                1. 品名: The Chinese text following "品名:".
+                2. 售價: The number following "$".
+                3. 容量: The number before "ML".
+                4. 保存期限: The MM-YY format after "Sell by date:".
                 5. Batch no.: The code following "Batch no.:".
                 
-                Just provide the raw text results for each field.
+                Just list the results line by line, no extra text.
                 """
                 response = model.generate_content([prompt] + imgs)
                 if response.text:
                     raw_res = response.text
+                    # 先過濾 AI 的說明文字 (Product Name: 等)
                     cleaned_data = parse_and_clean_data(raw_res)
                     
-                    # 針對品名的二次精準擷取
-                    name_match = re.search(r'(?:品名|Product Name)\s*[:：]?\s*([^\n\r*]+)', raw_res)
+                    # 抓取品名 (特別針對中文品名行)
+                    name_match = re.search(r'(?:品名|Name)\s*[:：]?\s*([^\n\r]+)', raw_res)
                     if name_match:
-                        cleaned_data[0] = name_match.group(1).strip().replace('*', '')
+                        # 清理多餘的標點與 AI 加註
+                        clean_name = name_match.group(1).strip().replace('*', '')
+                        cleaned_data[0] = re.sub(r'\(.*?\)', '', clean_name).strip()
                     else:
-                        cleaned_data[0] = raw_res.split('\n')[0].replace('*', '').replace('品名', '').replace(':', '').strip()
+                        cleaned_data[0] = raw_res.split('\n')[0].strip()
 
                     st.session_state.edit_data = cleaned_data
                     st.success("辨識完成")
         except Exception as e:
-            st.warning(f"AI 暫時出錯：{e}")
+            st.warning(f"AI 異常，請手動輸入：{e}")
 
 # --- 確認與入庫區 ---
 st.divider()
@@ -145,11 +147,11 @@ st.subheader("📝 確認入庫資訊")
 current_name = st.session_state.edit_data[0]
 current_date = st.session_state.edit_data[3]
 
-# 名稱建議邏輯
+# 相似名稱提醒功能
 is_known, suggestion = check_product_name(current_name)
 if current_name and not is_known:
     if suggestion:
-        if st.button(f"💡 點此改為清單名稱：{suggestion}"):
+        if st.button(f"💡 點此改為清單建議名稱：{suggestion}"):
             st.session_state.edit_data[0] = suggestion
             st.rerun()
 
