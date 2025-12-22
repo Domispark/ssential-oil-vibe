@@ -5,26 +5,34 @@ import google.generativeai as genai
 from PIL import Image
 import json
 from datetime import datetime
-import time
 
-# --- 頁面與基礎設定 ---
 st.set_page_config(page_title="精油倉儲 Vibe", page_icon="🌿")
-st.title("🌿 精油入庫 (鷹眼精準版)")
+st.title("🌿 精油入庫 (自動適配穩定版)")
 
-# 1. 初始化 AI - 【關鍵改進】直接鎖定最穩定的 1.5 flash 模型
+# 1. 初始化 AI
 if "GEMINI_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_KEY"])
-    # 不再使用 list_models，直接指定，減少錯誤與額度消耗
-    model = genai.GenerativeModel('gemini-1.5-flash')
 else:
-    st.error("❌ 找不到 GEMINI_KEY，請檢查 Secrets 設定。")
+    st.error("❌ 找不到 GEMINI_KEY")
+
+# --- 核心：動態獲取模型，確保不出現 404 ---
+@st.cache_data(ttl=600)
+def get_best_model():
+    """自動偵測目前帳號最穩定的模型路徑"""
+    try:
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        # 優先尋找 2.5-flash，若無則找 1.5-flash
+        best_match = next((m for m in models if "2.5-flash" in m), None)
+        if not best_match:
+            best_match = next((m for m in models if "1.5-flash" in m), "models/gemini-1.5-flash")
+        return best_match
+    except Exception:
+        return "models/gemini-1.5-flash"
 
 def save_to_sheet(data_list):
-    """將資料寫入 Google Sheets 並壓上時間戳記"""
     try:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        data_list.append(now_str) # F欄: 更新時間
-        
+        data_list.append(now_str)
         scope = ["https://www.googleapis.com/auth/spreadsheets"]
         creds_dict = json.loads(st.secrets["GOOGLE_JSON"])
         creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
@@ -36,83 +44,57 @@ def save_to_sheet(data_list):
         st.error(f"寫入表格失敗：{e}")
         return False
 
-# --- 2. 介面與圖像處理 ---
-st.info("💡 提示：請拍攝清晰的正面標籤與側面批號/日期。AI 會自動排除底部干擾碼。")
-uploaded_files = st.file_uploader("選取照片 (建議 2 張)", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
+# --- 2. 介面設定 ---
+current_model = get_best_model()
+st.sidebar.success(f"✅ 已連接模型：{current_model}")
 
-# 初始化暫存資料
+uploaded_files = st.file_uploader("選取精油照片 (正面標籤 + 側面日期)", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
+
 if 'edit_data' not in st.session_state:
     st.session_state.edit_data = ["", "", "", "", ""]
 
 if uploaded_files:
-    imgs = []
-    cols = st.columns(len(uploaded_files))
-    for i, file in enumerate(uploaded_files):
-        img = Image.open(file)
-        imgs.append(img)
-        cols[i].image(img, use_container_width=True, caption=f"照片 {i+1}")
+    imgs = [Image.open(f) for f in uploaded_files]
+    st.image(imgs, use_container_width=True)
 
     if st.button("🚀 啟動鷹眼 AI 辨識"):
-        with st.spinner('正在進行逐字顯微比對...'):
-            try:
-                # 【關鍵改進】全新編寫的「防呆+排除」提示詞
-                prompt = """你是一位擁有顯微鏡視覺的嚴謹倉管員。請逐字檢核圖片標籤，嚴禁腦補或混淆形近字。
+        try:
+            model = genai.GenerativeModel(current_model)
+            with st.spinner(f'正在使用 {current_model} 進行深度辨識...'):
+                # 強化指令：針對您的測試結果（雲杉/薰杉、甜椒/胡椒）進行修正
+                prompt = """你是一位極度嚴謹的植物學倉管員。請逐字檢核標籤，嚴禁腦補形近字：
+                1. **產品名稱**：請精準辨識標籤上的繁體中文。
+                   - 注意：是「白雲杉」而非「白薰杉」。
+                   - 注意：是「胡椒薄荷」而非「甜椒薄荷」。
+                   - 必須確保品名第一個字百分之百正確。
+                2. **售價**：標籤上的金額。
+                3. **容量**：標籤上的 ML 數。
+                4. **保存期限**：日期 '04-28' 轉換為 '2028-04'。
+                5. **Batch no.**：務必尋找 "Batch no.:" 之後的批號（如 7-330705）。
+                   - 【絕對忽略】標籤底部最大的儲位代碼（如 1-A01-A1-XXXX）。
 
-                執行任務：
-                1. **產品名稱 (繁體中文)**：
-                   - 嚴格區分筆畫：是「雲」杉 (Cloud) 還是「薰」衣草 (Lavender)？是「胡」椒 (Black Pepper) 還是「甜」椒 (Sweet Pepper)？
-                   - 僅提取主品名，精準輸出標籤上的漢字。
-                2. **售價**：提取標籤上的金額數字（如 560、700）。
-                3. **容量**：提取標籤上的 ML 數（如 5ML、10ML）。
-                4. **保存期限**：尋找日期資訊，統一轉換為 YYYY-MM 格式（如 2028-04）。
-                5. **Batch no. (批號)**：
-                   - **最高指令**：請尋找緊跟在文字 "Batch no.:" 或 "批號:" 之後的字串。
-                   - **排除干擾**：絕對【忽略】標籤最底部、字體最大的儲位代碼（類似 1-A01-A1-XXXX 格式）。
-                   - 真正的批號通常較短，且常位於條碼旁或日期下方（如 7-330705 或 01D-2090-10）。
-
-                輸出格式規範：
-                - 僅回傳一行文字，使用半角逗號 (,) 區隔這五項資訊。
-                - 順序必須是：名稱,售價,容量,保存期限,Batch no.
-                - 若某項資訊完全無法辨識，請填寫 N/A。"""
+                僅回傳格式：名稱,售價,容量,保存期限,Batch no. (逗號隔開)"""
                 
-                # 呼叫 AI
                 response = model.generate_content([prompt] + imgs)
-                
                 if response.text:
-                    # 資料清洗：移除可能的換行與多餘空白
-                    clean_text = response.text.strip().replace("\n", "").replace(" ", "")
-                    st.session_state.edit_data = clean_text.split(",")
-                    st.success("✅ 精準辨識完成！請校對下方結果。")
-                
-            except Exception as e:
-                error_msg = str(e)
-                if "429" in error_msg:
-                     st.warning("⚠️ 系統繁忙 (429)。請等待約 30 秒後再試。")
-                elif "404" in error_msg:
-                     st.error("❌ API 路徑錯誤 (404)。請確保您已重新部署 App。")
-                else:
-                     st.error(f"AI 通訊失敗：{e}。請直接手動填寫。")
+                    clean_res = response.text.strip().replace("\n", "").replace(" ", "")
+                    st.session_state.edit_data = clean_res.split(",")
+                    st.success("辨識完成！")
+        except Exception as e:
+            st.error(f"連線失敗：{e}。建議再次 Reboot App。")
 
-# --- 3. 手動確認與入庫區 ---
+# --- 3. 手動確認區 ---
 st.divider()
-st.subheader("📝 入庫資訊最終校對")
-# 使用 columns 讓介面更緊湊
-c1, c2 = st.columns(2)
-f1 = c1.text_input("產品名稱", value=st.session_state.edit_data[0])
-f2 = c2.text_input("售價", value=st.session_state.edit_data[1] if len(st.session_state.edit_data)>1 else "")
+st.subheader("📝 入庫資訊檢查")
+f1 = st.text_input("產品名稱", value=st.session_state.edit_data[0])
+f2 = st.text_input("售價", value=st.session_state.edit_data[1] if len(st.session_state.edit_data)>1 else "")
+f3 = st.text_input("容量", value=st.session_state.edit_data[2] if len(st.session_state.edit_data)>2 else "")
+f4 = st.text_input("保存期限 (YYYY-MM)", value=st.session_state.edit_data[3] if len(st.session_state.edit_data)>3 else "")
+f5 = st.text_input("Batch no.", value=st.session_state.edit_data[4] if len(st.session_state.edit_data)>4 else "")
 
-c3, c4 = st.columns(2)
-f3 = c3.text_input("容量", value=st.session_state.edit_data[2] if len(st.session_state.edit_data)>2 else "")
-f4 = c4.text_input("保存期限 (YYYY-MM)", value=st.session_state.edit_data[3] if len(st.session_state.edit_data)>3 else "")
-
-f5 = st.text_input("Batch no. (請確認非底部代碼)", value=st.session_state.edit_data[4] if len(st.session_state.edit_data)>4 else "")
-
-if st.button("✅ 確認無誤，寫入資料庫"):
-    # 確保至少有名稱才存入
+if st.button("✅ 確認無誤，正式入庫"):
     if f1 and save_to_sheet([f1, f2, f3, f4, f5]):
         st.balloons()
-        st.success("🎉 成功！資料與時間戳記已同步至 Google Sheets。")
-        # 清空暫存，準備下一筆
+        st.success("✅ 存入成功！時間戳記已同步更新。")
         st.session_state.edit_data = ["", "", "", "", ""]
-        time.sleep(1) # 稍等一下讓使用者看到成功訊息
         st.rerun()
