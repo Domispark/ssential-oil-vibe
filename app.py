@@ -9,7 +9,7 @@ import difflib
 import re
 
 st.set_page_config(page_title="精油倉儲 Vibe", page_icon="🌿")
-st.title("🌿 精油入庫 (分工辨識究極版)")
+st.title("🌿 精油入庫 (自動相容版)")
 
 # --- 步驟 0: 產品資料庫 ---
 KNOWN_PRODUCTS = [
@@ -21,19 +21,26 @@ KNOWN_PRODUCTS = [
 if "GEMINI_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_KEY"])
 else:
-    st.error("❌ 找不到 GEMINI_KEY，請檢查 Streamlit Secrets")
+    st.error("❌ 找不到 GEMINI_KEY")
 
 @st.cache_data(ttl=600)
 def get_working_models():
-    """優先回傳穩定版模型，避開 limit: 0 的實驗版本"""
-    # 這裡手動排列順序，將穩定且額度高的放在前面
-    priority_models = [
-        "models/gemini-1.5-flash-latest",
-        "models/gemini-1.5-flash",
-        "models/gemini-2.0-flash-exp",
-        "models/gemini-2.5-flash"
-    ]
-    return priority_models
+    """動態從 API 抓取目前帳號可用的模型清單，避免 404 錯誤"""
+    try:
+        # 呼叫 API 獲取可用模型
+        models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                # 排除掉某些不支援圖片的舊型號
+                if "gemini" in m.name.lower():
+                    models.append(m.name)
+        
+        # 排序：讓 flash 系列排在前面，因為它們比較快且額度較多
+        models.sort(key=lambda x: 'flash' not in x.lower())
+        return models
+    except Exception as e:
+        # 如果連 list_models 都失敗，回傳最基礎的備案
+        return ["models/gemini-1.5-flash", "models/gemini-pro-vision"]
 
 def save_to_sheet(data_list):
     try:
@@ -61,10 +68,7 @@ def check_product_name(ai_input_name):
 
 # --- 步驟 2: 資料解析函式 ---
 def parse_front_label(text):
-    """處理正面：品名、售價、容量"""
     res = {"name": "", "price": "", "vol": ""}
-    
-    # 1. 品名
     name_match = re.search(r'品名\s*[:：]?\s*([^\n\r*]+)', text)
     if name_match:
         res["name"] = name_match.group(1).strip()
@@ -72,47 +76,35 @@ def parse_front_label(text):
         lines = [l.strip() for l in text.split('\n') if l.strip()]
         if len(lines) > 0:
             res["name"] = lines[0].replace('品名', '').replace(':', '').strip()
-
-    # 2. 售價
     price_match = re.search(r'(?:\$|售價|零售價)\s*[:：]?\s*(\d[\d\s]*\d)', text)
     if price_match:
         res["price"] = re.sub(r'\D', '', price_match.group(1))
-        
-    # 3. 容量
     vol_match = re.search(r'(\d+)\s*(?:ML|ml|毫升|容量)', text, re.IGNORECASE)
     if not vol_match:
         vol_match = re.search(r'容量\s*[:：]?\s*(\d+)', text)
     if vol_match:
         res["vol"] = vol_match.group(1)
-        
     return res
 
 def parse_side_label(text):
-    """處理側面：效期、批號"""
     res = {"expiry": "", "batch": ""}
-    
-    # 1. 效期：MM-YY 轉 YYYY-MM
     date_match = re.search(r'(?:Sell\s*by\s*date|效期)\s*[:：]?\s*(\d{2})[-/](\d{2})', text, re.IGNORECASE)
     if date_match:
         mm, yy = date_match.groups()
         res["expiry"] = f"20{yy}-{mm}"
-    
-    # 2. 批號
     batch_match = re.search(r'(?:Batch|批號)\s*(?:no\.?)?\s*[:：]?\s*([A-Z0-9-]+)', text, re.IGNORECASE)
     if batch_match:
         candidate = batch_match.group(1).strip()
-        # 排除長條碼數字
         if not (candidate.isdigit() and len(candidate) > 9):
             res["batch"] = candidate
-            
     return res
 
 # --- 3. 介面與辨識 ---
 st.sidebar.subheader("⚙️ 系統診斷")
 available_models = get_working_models()
-selected_model = st.sidebar.selectbox("當前使用模型", available_models, index=0)
+selected_model = st.sidebar.selectbox("當前使用模型 (已排除無效型號)", available_models, index=0)
 
-st.info("📌 第一張：標籤正面 (含品名、售價)\n📌 第二張：標籤側面 (含批號、效期)")
+st.info("📌 上傳「正面」與「側面」照片。")
 uploaded_files = st.file_uploader("選取照片", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
 
 if 'edit_data' not in st.session_state:
@@ -124,11 +116,12 @@ if uploaded_files:
 
     if st.button("🚀 啟動分段辨識"):
         if len(uploaded_files) < 2:
-            st.warning("⚠️ 請同時上傳兩張照片（正面與側面）。")
+            st.warning("⚠️ 請上傳兩張照片。")
         else:
             try:
+                # 這裡使用動態抓取的 selected_model
                 model = genai.GenerativeModel(selected_model)
-                with st.spinner(f'正在使用 {selected_model} 分析中...'):
+                with st.spinner(f'正在使用 {selected_model} 辨識...'):
                     # 辨識正面
                     p1 = "OCR FRONT label. Find '品名', '$', and 'ML'. Output ALL text."
                     r1 = model.generate_content([p1, imgs[0]])
@@ -141,37 +134,18 @@ if uploaded_files:
                     
                     st.session_state.edit_data = [
                         f_data["name"] if f_data["name"] else "辨識失敗",
-                        f_data["price"], 
-                        f_data["vol"],
-                        s_data["expiry"], 
-                        s_data["batch"]
+                        f_data["price"], f_data["vol"],
+                        s_data["expiry"], s_data["batch"]
                     ]
-                    st.success("辨識成功！")
+                    st.success("辨識完成")
             except Exception as e:
                 st.error(f"辨識異常：{e}")
-                if "429" in str(e):
-                    st.warning("提示：這通常代表該模型配額已滿，請嘗試更換側邊欄的模型，或更換 API Key。")
 
 # --- 4. 確認區 ---
 st.divider()
 st.subheader("📝 確認入庫資訊")
-
 f1 = st.text_input("產品名稱", value=st.session_state.edit_data[0])
 is_known, suggestion = check_product_name(f1)
 if f1 and not is_known and suggestion:
     if st.button(f"💡 建議更正為：{suggestion}"):
-        st.session_state.edit_data[0] = suggestion
-        st.rerun()
-
-f2 = st.text_input("售價", value=st.session_state.edit_data[1])
-f3 = st.text_input("容量", value=st.session_state.edit_data[2])
-f4 = st.text_input("保存期限 (YYYY-MM)", value=st.session_state.edit_data[3])
-f5 = st.text_input("Batch no.", value=st.session_state.edit_data[4])
-
-if st.button("✅ 正式入庫"):
-    if f1 and f1 != "辨識失敗":
-        if save_to_sheet([f1, f2, f3, f4, f5]):
-            st.balloons()
-            st.success(f"✅ {f1} 已成功入庫！")
-            st.session_state.edit_data = ["", "", "", "", ""]
-            st.rerun()
+        st.session_state.edit_data
