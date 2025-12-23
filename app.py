@@ -8,9 +8,9 @@ from datetime import datetime
 import re
 
 st.set_page_config(page_title="精油倉儲 Vibe", page_icon="🌿")
-st.title("🌿 精油入庫 (純淨強化版)")
+st.title("🌿 精油入庫 (繁中強化版)")
 
-# --- 1. 側邊欄配置 (僅保留模型選單) ---
+# --- 1. 側邊欄配置 ---
 st.sidebar.subheader("⚙️ 系統診斷")
 
 ALLOWED_MODELS = [
@@ -30,39 +30,44 @@ def get_clean_models():
 
 selected_model = st.sidebar.selectbox("當前使用模型", get_clean_models())
 
-# --- 2. 核心功能函式 (強化字串清洗) ---
+# --- 2. 核心功能函式 ---
 if "GEMINI_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_KEY"])
 else:
     st.error("❌ 找不到 GEMINI_KEY")
 
 def clean_extracted_value(text):
-    """強力移除 AI 輸出的雜訊，如 **、"}、Name 等"""
+    """強力移除雜訊，保留純淨的繁體中文與數據"""
     if not text: return ""
-    # 移除 Markdown、括號、冒號及常見雜訊
+    # 移除 Markdown、括號、冒號及 AI 常見的前言 (如 Based on...)
     s = re.sub(r'[\*\"\}\{\[\]\:\#]', '', text)
-    # 移除 AI 有時會自動補上的標籤詞
-    s = re.sub(r'(Product Name|Name|品名|售價|容量)', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'(Based on|text|found|Product|Name|品名|售價|容量|毫升)', '', s, flags=re.IGNORECASE)
     return s.strip()
 
 def parse_front_label(text):
-    """解析正面：品名、售價、容量"""
+    """解析正面：鎖定繁中品名、售價、容量"""
     res = {"name": "", "price": "", "vol": ""}
-    # 1. 品名：找標籤後第一個字串，或直接抓第一行
-    name_match = re.search(r'品名\s*[:：]?\s*([^\s\n\r]+)', text)
-    res["name"] = clean_extracted_value(name_match.group(1)) if name_match else clean_extracted_value(text.split('\n')[0])
+    
+    # 1. 品名：鎖定繁體中文關鍵字
+    name_match = re.search(r'品名\s*[:：]?\s*([\u4e00-\u9fa5-]+)', text)
+    if name_match:
+        res["name"] = clean_extracted_value(name_match.group(1))
+    else:
+        # 備案：抓取第一行非英文的繁中內容
+        lines = [l.strip() for l in text.split('\n') if any('\u4e00' <= char <= '\u9fa5' for char in l)]
+        if lines: res["name"] = clean_extracted_value(lines[0])
 
-    # 2. 售價
-    price_match = re.search(r'(?:售價|\$)\s*[:：]?\s*(\d+)', text)
+    # 2. 售價 (抓取三位數以上的純數字)
+    price_match = re.search(r'(?:售價|零售價|\$)\s*[:：]?\s*(\d{3,})', text)
     if price_match: res["price"] = price_match.group(1)
 
-    # 3. 容量 (數字 + ML/ml)
+    # 3. 容量
     vol_match = re.search(r'(\d+)\s*(?:ML|ml|毫升)', text, re.IGNORECASE)
     if vol_match: res["vol"] = vol_match.group(1)
     return res
 
 def parse_side_label(text):
-    """解析側面：效期、批號"""
+    """解析側面：鎖定效期、長數字批號"""
     res = {"expiry": "", "batch": ""}
     # 1. 效期 MM-YY
     date_match = re.search(r'(?:date|效期)\s*[:：]?\s*(\d{2})[-/](\d{2})', text, re.IGNORECASE)
@@ -70,9 +75,10 @@ def parse_side_label(text):
         mm, yy = date_match.groups()
         res["expiry"] = f"20{yy}-{mm}"
 
-    # 2. 批號 (鎖定數字連字號格式 14-268665)
-    batch_match = re.search(r'(?:Batch|批號)\s*(?:no\.?)?\s*[:：]?\s*([0-9-]{4,})', text, re.IGNORECASE)
-    if batch_match: res["batch"] = batch_match.group(1).strip()
+    # 2. 批號 (強力鎖定包含橫線的長數字，避開 no 字眼)
+    batch_match = re.search(r'(?:Batch|批號)\s*(?:no\.?)?\s*[:：]?\s*([0-9-]{6,})', text, re.IGNORECASE)
+    if batch_match: 
+        res["batch"] = batch_match.group(1).strip()
     return res
 
 def save_to_sheet(data_list):
@@ -90,28 +96,30 @@ def save_to_sheet(data_list):
         st.error(f"寫入表格失敗：{e}")
         return False
 
-# --- 3. 作業區 ---
+# --- 3. 主要作業區 ---
 if 'edit_data' not in st.session_state:
     st.session_state.edit_data = ["", "", "", "", ""]
 
-uploaded_files = st.file_uploader("上傳「正面」與「側面」照片", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
+uploaded_files = st.file_uploader("上傳照片 (左：正面，右：側面)", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
 
 if uploaded_files:
     imgs = [Image.open(f) for f in uploaded_files]
     st.image(imgs, width=200)
 
-    if st.button("🚀 啟動強化辨識"):
+    if st.button("🚀 啟動繁中精準辨識"):
         if len(uploaded_files) < 2:
-            st.warning("⚠️ 請上傳兩張照片。")
+            st.warning("⚠️ 請同時上傳正面與側面照片。")
         else:
             try:
                 model = genai.GenerativeModel(selected_model)
-                with st.spinner('AI 正在讀取標籤細節...'):
-                    # 提示詞調整：要求 AI 回傳原始辨識結果，增加解析成功率
-                    r1 = model.generate_content(["Read all text on this essential oil FRONT label. Find name, price, and ml.", imgs[0]])
+                with st.spinner('AI 正在讀取繁體中文標籤...'):
+                    # 提示詞優化：強調繁體中文與純文字輸出
+                    p1 = "請讀取精油標籤正面。請找出「品名」、「零售價」與「容量」。請只回傳找到的文字，不要任何解釋。"
+                    r1 = model.generate_content([p1, imgs[0]])
                     f_data = parse_front_label(r1.text)
                     
-                    r2 = model.generate_content(["Read all text on this SIDE label. Find the Sell by date and Batch no.", imgs[1]])
+                    p2 = "請讀取精油標籤側面。請找出「Sell by date」與「Batch no」。請回傳原始數字與日期，不要解釋。"
+                    r2 = model.generate_content([p2, imgs[1]])
                     s_data = parse_side_label(r2.text)
                     
                     st.session_state.edit_data = [
@@ -122,11 +130,11 @@ if uploaded_files:
                 st.rerun()
             except Exception as e:
                 if "429" in str(e):
-                    st.error("❌ 每日 API 配額已達上限。")
+                    st.error("❌ 今日免費額度已用罄，請明天再試或切換模型。")
                 else:
                     st.error(f"辨識異常：{e}")
 
-# --- 4. 確認區 ---
+# --- 4. 確認與入庫區 ---
 st.divider()
 st.subheader("📝 確認入庫資訊")
 
@@ -136,10 +144,10 @@ f3 = st.text_input("容量 (ML)", value=st.session_state.edit_data[2])
 f4 = st.text_input("保存期限 (YYYY-MM)", value=st.session_state.edit_data[3])
 f5 = st.text_input("Batch no.", value=st.session_state.edit_data[4])
 
-if st.button("✅ 正式入庫"):
+if st.button("✅ 確認無誤，正式入庫"):
     if f1 and f1 != "辨識失敗":
         if save_to_sheet([f1, f2, f3, f4, f5]):
             st.balloons()
-            st.success(f"✅ {f1} 已成功入庫！")
+            st.success(f"✅ {f1} 已入庫！")
             st.session_state.edit_data = ["", "", "", "", ""]
             st.rerun()
