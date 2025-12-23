@@ -9,12 +9,12 @@ import difflib
 import re
 
 st.set_page_config(page_title="精油倉儲 Vibe", page_icon="🌿")
-st.title("🌿 精油入庫 (模型自動對齊版)")
+st.title("🌿 精油入庫 (2.5 Flash 精準版)")
 
 # --- 步驟 0: 產品資料庫 ---
 KNOWN_PRODUCTS = [
     "胡椒薄荷-特級", "胡椒薄荷-一般", "綠薄荷精油", "白雲杉-特級",
-    "甜橙精油", "薰草精油-高地", "茶樹精油"
+    "甜橙精油", "薰衣草精油-高地", "茶樹精油"
 ]
 
 # 1. 初始化 AI
@@ -25,27 +25,33 @@ else:
 
 @st.cache_data(ttl=600)
 def get_working_models():
-    """動態掃描 API 支援的所有模型名稱，徹底避開 404 錯誤"""
+    """根據測試回饋，過濾掉不支援圖片的模型並排序"""
     try:
         available_names = []
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
-                # 排除掉某些不支援圖片的型號
-                if "gemini" in m.name.lower():
-                    available_names.append(m.name)
+                name = m.name
+                # 排除不支援圖片輸入的特殊模型 (TTS, Live, embedding)
+                if any(x in name.lower() for x in ["tts", "live", "embed"]):
+                    continue
+                available_names.append(name)
         
-        # 根據您的截圖，優先關鍵字排序
-        priority_keywords = ["3-flash", "2.5-flash", "1.5-flash", "2.0-flash"]
-        
+        # 優先級排序：2.5-flash > 3-flash > 1.5-flash
+        priority = ["2.5-flash", "3-flash", "1.5-flash"]
         sorted_models = []
-        for kw in priority_keywords:
+        for p in priority:
             for name in available_names:
-                if kw in name.lower() and name not in sorted_models:
+                if p in name.lower() and name not in sorted_models:
                     sorted_models.append(name)
         
-        return sorted_models if sorted_models else available_names
-    except Exception as e:
-        return ["models/gemini-1.5-flash", "models/gemini-2.0-flash-exp"]
+        # 補上剩餘沒排到的
+        for name in available_names:
+            if name not in sorted_models:
+                sorted_models.append(name)
+                
+        return sorted_models
+    except Exception:
+        return ["models/gemini-2.5-flash", "models/gemini-1.5-flash"]
 
 def save_to_sheet(data_list):
     try:
@@ -71,43 +77,76 @@ def check_product_name(ai_input_name):
         return False, matches[0]
     return False, None
 
-# --- 步驟 2: 資料解析函式 ---
+# --- 步驟 2: 資料解析函式 (針對 2.5 Flash 強化) ---
+def clean_ai_text(text):
+    """移除 AI 回應中可能夾雜的 JSON 語法符號"""
+    if not text: return ""
+    # 移除常見的雜訊符號
+    bad_chars = ['"', '{', '}', '[', ']', ':', ',', 'json', '`', ';']
+    temp = text
+    for char in bad_chars:
+        temp = temp.replace(char, ' ')
+    return temp.strip()
+
 def parse_front_label(text):
+    """處理正面：品名、售價、容量"""
     res = {"name": "", "price": "", "vol": ""}
-    name_match = re.search(r'品名\s*[:：]?\s*([^\n\r*]+)', text)
-    if name_match:
-        res["name"] = name_match.group(1).strip()
+    clean_t = clean_ai_text(text)
+    
+    # 1. 品名 (強化對 "胡椒薄荷-特級" 的抓取)
+    name_match = re.search(r'品名\s*([^\s\n]+)', clean_t)
+    if not name_match:
+        # 備案：如果沒有品名字樣，抓第一行非空白字串
+        lines = [l.strip() for l in clean_t.split('\n') if l.strip()]
+        if lines: res["name"] = lines[0]
     else:
-        lines = [l.strip() for l in text.split('\n') if l.strip()]
-        if len(lines) > 0:
-            res["name"] = lines[0].replace('品名', '').replace(':', '').strip()
-    price_match = re.search(r'(?:\$|售價|零售價)\s*[:：]?\s*(\d[\d\s]*\d)', text)
+        res["name"] = name_match.group(1).strip()
+
+    # 2. 售價
+    price_match = re.search(r'(?:售價|\$)\s*(\d+)', clean_t)
     if price_match:
-        res["price"] = re.sub(r'\D', '', price_match.group(1))
-    vol_match = re.search(r'(\d+)\s*(?:ML|ml|毫升|容量)', text, re.IGNORECASE)
-    if not vol_match:
-        vol_match = re.search(r'容量\s*[:：]?\s*(\d+)', text)
+        res["price"] = price_match.group(1)
+        
+    # 3. 容量
+    vol_match = re.search(r'(\d+)\s*(?:ML|ml|毫升)', clean_t)
     if vol_match:
         res["vol"] = vol_match.group(1)
+        
     return res
 
 def parse_side_label(text):
+    """處理側面：效期、批號"""
     res = {"expiry": "", "batch": ""}
-    date_match = re.search(r'(?:Sell\s*by\s*date|效期)\s*[:：]?\s*(\d{2})[-/](\d{2})', text, re.IGNORECASE)
+    # 側面標籤不建議清理掉冒號，因為 Batch no.: 很常用到
+    raw_t = text.replace('"', '').replace('`', '').strip()
+    
+    # 1. 效期：MM-YY
+    date_match = re.search(r'(?:date|效期)\s*[:：]?\s*(\d{2})[-/](\d{2})', raw_t, re.IGNORECASE)
     if date_match:
         mm, yy = date_match.groups()
         res["expiry"] = f"20{yy}-{mm}"
-    batch_match = re.search(r'(?:Batch|批號)\s*(?:no\.?)?\s*[:：]?\s*([A-Z0-9-]+)', text, re.IGNORECASE)
+    
+    # 2. 批號：強化對 "Batch no.:" 的數字抓取
+    # 規則：抓取 Batch no 之後，直到換行或空格前的字串
+    batch_match = re.search(r'(?:Batch|批號)\s*(?:no\.?)?\s*[:：]?\s*([A-Z0-9-]+)', raw_t, re.IGNORECASE)
     if batch_match:
         candidate = batch_match.group(1).strip()
-        if not (candidate.isdigit() and len(candidate) > 9):
+        # 排除誤抓為 "no" 的情況
+        if candidate.lower() != "no":
             res["batch"] = candidate
+            
     return res
 
 # --- 3. 介面與辨識 ---
 st.sidebar.subheader("⚙️ 系統診斷")
 available_models = get_working_models()
-selected_model = st.sidebar.selectbox("當前使用模型", available_models, index=0)
+# 預設選取 2.5-flash (如果存在)
+default_idx = 0
+for i, m in enumerate(available_models):
+    if "2.5-flash" in m.lower() and "lite" not in m.lower():
+        default_idx = i
+        break
+selected_model = st.sidebar.selectbox("當前使用模型", available_models, index=default_idx)
 
 st.info("📌 第一張：標籤正面 (含品名、售價)\n📌 第二張：標籤側面 (含批號、效期)")
 uploaded_files = st.file_uploader("選取照片", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
@@ -121,18 +160,18 @@ if uploaded_files:
 
     if st.button("🚀 啟動分段辨識"):
         if len(uploaded_files) < 2:
-            st.warning("⚠️ 請上傳兩張照片。")
+            st.warning("⚠️ 請上傳兩張照片（正面與側面）。")
         else:
             try:
                 model = genai.GenerativeModel(selected_model)
                 with st.spinner(f'AI 使用 {selected_model} 分析中...'):
                     # 辨識正面
-                    p1 = "OCR FRONT label. Find '品名', '$', and 'ML'. Output ALL text."
+                    p1 = "OCR FRONT label. Find '品名', '$', and 'ML'. Output RAW text."
                     r1 = model.generate_content([p1, imgs[0]])
                     f_data = parse_front_label(r1.text)
                     
                     # 辨識側面
-                    p2 = "OCR SIDE label. Find 'Sell by date' and 'Batch no'. Output ALL text."
+                    p2 = "OCR SIDE label. Find 'Sell by date' and 'Batch no'. Output RAW text."
                     r2 = model.generate_content([p2, imgs[1]])
                     s_data = parse_side_label(r2.text)
                     
@@ -152,19 +191,4 @@ st.subheader("📝 確認入庫資訊")
 f1 = st.text_input("產品名稱", value=st.session_state.edit_data[0])
 is_known, suggestion = check_product_name(f1)
 if f1 and not is_known and suggestion:
-    if st.button(f"💡 建議更正為：{suggestion}"):
-        st.session_state.edit_data[0] = suggestion
-        st.rerun()
-
-f2 = st.text_input("售價", value=st.session_state.edit_data[1])
-f3 = st.text_input("容量", value=st.session_state.edit_data[2])
-f4 = st.text_input("保存期限 (YYYY-MM)", value=st.session_state.edit_data[3])
-f5 = st.text_input("Batch no.", value=st.session_state.edit_data[4])
-
-if st.button("✅ 正式入庫"):
-    if f1 and f1 != "辨識失敗":
-        if save_to_sheet([f1, f2, f3, f4, f5]):
-            st.balloons()
-            st.success(f"✅ {f1} 已入庫！")
-            st.session_state.edit_data = ["", "", "", "", ""]
-            st.rerun()
+    if st.button
