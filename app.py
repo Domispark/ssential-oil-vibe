@@ -21,16 +21,19 @@ KNOWN_PRODUCTS = [
 if "GEMINI_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_KEY"])
 else:
-    st.error("❌ 找不到 GEMINI_KEY")
+    st.error("❌ 找不到 GEMINI_KEY，請檢查 Streamlit Secrets")
 
 @st.cache_data(ttl=600)
 def get_working_models():
-    try:
-        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        models.sort(key=lambda x: 'flash' not in x.lower())
-        return models
-    except Exception:
-        return ["models/gemini-1.5-flash", "models/gemini-2.0-flash-exp"]
+    """優先回傳穩定版模型，避開 limit: 0 的實驗版本"""
+    # 這裡手動排列順序，將穩定且額度高的放在前面
+    priority_models = [
+        "models/gemini-1.5-flash-latest",
+        "models/gemini-1.5-flash",
+        "models/gemini-2.0-flash-exp",
+        "models/gemini-2.5-flash"
+    ]
+    return priority_models
 
 def save_to_sheet(data_list):
     try:
@@ -61,12 +64,11 @@ def parse_front_label(text):
     """處理正面：品名、售價、容量"""
     res = {"name": "", "price": "", "vol": ""}
     
-    # 1. 品名：嘗試多種抓取方式
+    # 1. 品名
     name_match = re.search(r'品名\s*[:：]?\s*([^\n\r*]+)', text)
     if name_match:
         res["name"] = name_match.group(1).strip()
     else:
-        # 如果沒抓到「品名」字樣，通常在第一行或第二行
         lines = [l.strip() for l in text.split('\n') if l.strip()]
         if len(lines) > 0:
             res["name"] = lines[0].replace('品名', '').replace(':', '').strip()
@@ -89,16 +91,17 @@ def parse_side_label(text):
     """處理側面：效期、批號"""
     res = {"expiry": "", "batch": ""}
     
-    # 1. 效期：MM-YY
+    # 1. 效期：MM-YY 轉 YYYY-MM
     date_match = re.search(r'(?:Sell\s*by\s*date|效期)\s*[:：]?\s*(\d{2})[-/](\d{2})', text, re.IGNORECASE)
     if date_match:
         mm, yy = date_match.groups()
         res["expiry"] = f"20{yy}-{mm}"
     
-    # 2. 批號：尋找關鍵字後的字串
+    # 2. 批號
     batch_match = re.search(r'(?:Batch|批號)\s*(?:no\.?)?\s*[:：]?\s*([A-Z0-9-]+)', text, re.IGNORECASE)
     if batch_match:
         candidate = batch_match.group(1).strip()
+        # 排除長條碼數字
         if not (candidate.isdigit() and len(candidate) > 9):
             res["batch"] = candidate
             
@@ -121,42 +124,45 @@ if uploaded_files:
 
     if st.button("🚀 啟動分段辨識"):
         if len(uploaded_files) < 2:
-            st.warning("⚠️ 請上傳兩張照片。")
+            st.warning("⚠️ 請同時上傳兩張照片（正面與側面）。")
         else:
             try:
                 model = genai.GenerativeModel(selected_model)
-                with st.spinner('AI 分析中...'):
-                    # 辨識正面：提示詞加強
+                with st.spinner(f'正在使用 {selected_model} 分析中...'):
+                    # 辨識正面
                     p1 = "OCR FRONT label. Find '品名', '$', and 'ML'. Output ALL text."
                     r1 = model.generate_content([p1, imgs[0]])
                     f_data = parse_front_label(r1.text)
                     
-                    # 辨識側面：提示詞加強
+                    # 辨識側面
                     p2 = "OCR SIDE label. Find 'Sell by date' and 'Batch no'. Output ALL text."
                     r2 = model.generate_content([p2, imgs[1]])
                     s_data = parse_side_label(r2.text)
                     
                     st.session_state.edit_data = [
                         f_data["name"] if f_data["name"] else "辨識失敗",
-                        f_data["price"], f_data["vol"],
-                        s_data["expiry"], s_data["batch"]
+                        f_data["price"], 
+                        f_data["vol"],
+                        s_data["expiry"], 
+                        s_data["batch"]
                     ]
-                    st.success("辨識完成")
+                    st.success("辨識成功！")
             except Exception as e:
                 st.error(f"辨識異常：{e}")
+                if "429" in str(e):
+                    st.warning("提示：這通常代表該模型配額已滿，請嘗試更換側邊欄的模型，或更換 API Key。")
 
 # --- 4. 確認區 ---
 st.divider()
 st.subheader("📝 確認入庫資訊")
 
-current_name = st.session_state.edit_data[0]
-is_known, suggestion = check_product_name(current_name)
-if current_name and not is_known and suggestion:
+f1 = st.text_input("產品名稱", value=st.session_state.edit_data[0])
+is_known, suggestion = check_product_name(f1)
+if f1 and not is_known and suggestion:
     if st.button(f"💡 建議更正為：{suggestion}"):
         st.session_state.edit_data[0] = suggestion
         st.rerun()
 
-f1 = st.text_input("產品名稱", value=st.session_state.edit_data[0])
 f2 = st.text_input("售價", value=st.session_state.edit_data[1])
 f3 = st.text_input("容量", value=st.session_state.edit_data[2])
 f4 = st.text_input("保存期限 (YYYY-MM)", value=st.session_state.edit_data[3])
@@ -166,6 +172,6 @@ if st.button("✅ 正式入庫"):
     if f1 and f1 != "辨識失敗":
         if save_to_sheet([f1, f2, f3, f4, f5]):
             st.balloons()
-            st.success(f"✅ {f1} 已入庫！")
+            st.success(f"✅ {f1} 已成功入庫！")
             st.session_state.edit_data = ["", "", "", "", ""]
             st.rerun()
