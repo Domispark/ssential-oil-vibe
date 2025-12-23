@@ -14,7 +14,7 @@ st.title("🌿 精油入庫 (模型自動對齊版)")
 # --- 步驟 0: 產品資料庫 ---
 KNOWN_PRODUCTS = [
     "胡椒薄荷-特級", "胡椒薄荷-一般", "綠薄荷精油", "白雲杉-特級",
-    "甜橙精油", "薰衣草精油-高地", "茶樹精油"
+    "甜橙精油", "薰草精油-高地", "茶樹精油"
 ]
 
 # 1. 初始化 AI
@@ -29,12 +29,12 @@ def get_working_models():
     try:
         available_names = []
         for m in genai.list_models():
-            # 只選取支援 generateContent (圖片/文字生成) 的模型
             if 'generateContent' in m.supported_generation_methods:
-                available_names.append(m.name)
+                # 排除掉某些不支援圖片的型號
+                if "gemini" in m.name.lower():
+                    available_names.append(m.name)
         
-        # 定義我們希望優先使用的模型關鍵字順序
-        # 根據您的截圖優先嘗試 3-flash, 2.5-flash, 1.5-flash
+        # 根據您的截圖，優先關鍵字排序
         priority_keywords = ["3-flash", "2.5-flash", "1.5-flash", "2.0-flash"]
         
         sorted_models = []
@@ -43,10 +43,8 @@ def get_working_models():
                 if kw in name.lower() and name not in sorted_models:
                     sorted_models.append(name)
         
-        # 如果排序後的清單為空，則回傳原始清單或備案
         return sorted_models if sorted_models else available_names
     except Exception as e:
-        st.warning(f"無法自動獲取模型清單，將使用基礎備案。")
         return ["models/gemini-1.5-flash", "models/gemini-2.0-flash-exp"]
 
 def save_to_sheet(data_list):
@@ -109,9 +107,9 @@ def parse_side_label(text):
 # --- 3. 介面與辨識 ---
 st.sidebar.subheader("⚙️ 系統診斷")
 available_models = get_working_models()
-selected_model = st.sidebar.selectbox("當前 API 支援的模型", available_models, index=0)
+selected_model = st.sidebar.selectbox("當前使用模型", available_models, index=0)
 
-st.info("📌 系統已動態偵測您的帳號權限，請從側邊欄選取一個非 429 報錯的模型進行測試。")
+st.info("📌 第一張：標籤正面 (含品名、售價)\n📌 第二張：標籤側面 (含批號、效期)")
 uploaded_files = st.file_uploader("選取照片", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
 
 if 'edit_data' not in st.session_state:
@@ -127,11 +125,13 @@ if uploaded_files:
         else:
             try:
                 model = genai.GenerativeModel(selected_model)
-                with st.spinner(f'正在使用 {selected_model} 辨識...'):
+                with st.spinner(f'AI 使用 {selected_model} 分析中...'):
+                    # 辨識正面
                     p1 = "OCR FRONT label. Find '品名', '$', and 'ML'. Output ALL text."
                     r1 = model.generate_content([p1, imgs[0]])
                     f_data = parse_front_label(r1.text)
                     
+                    # 辨識側面
                     p2 = "OCR SIDE label. Find 'Sell by date' and 'Batch no'. Output ALL text."
                     r2 = model.generate_content([p2, imgs[1]])
                     s_data = parse_side_label(r2.text)
@@ -141,13 +141,14 @@ if uploaded_files:
                         f_data["price"], f_data["vol"],
                         s_data["expiry"], s_data["batch"]
                     ]
-                    st.success("辨識成功")
+                    st.success("辨識完成")
             except Exception as e:
                 st.error(f"辨識異常：{e}")
 
 # --- 4. 確認區 ---
 st.divider()
 st.subheader("📝 確認入庫資訊")
+
 f1 = st.text_input("產品名稱", value=st.session_state.edit_data[0])
 is_known, suggestion = check_product_name(f1)
 if f1 and not is_known and suggestion:
@@ -156,4 +157,14 @@ if f1 and not is_known and suggestion:
         st.rerun()
 
 f2 = st.text_input("售價", value=st.session_state.edit_data[1])
-f3 = st.text_input("容量", value=st.session_state.
+f3 = st.text_input("容量", value=st.session_state.edit_data[2])
+f4 = st.text_input("保存期限 (YYYY-MM)", value=st.session_state.edit_data[3])
+f5 = st.text_input("Batch no.", value=st.session_state.edit_data[4])
+
+if st.button("✅ 正式入庫"):
+    if f1 and f1 != "辨識失敗":
+        if save_to_sheet([f1, f2, f3, f4, f5]):
+            st.balloons()
+            st.success(f"✅ {f1} 已入庫！")
+            st.session_state.edit_data = ["", "", "", "", ""]
+            st.rerun()
