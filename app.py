@@ -9,7 +9,7 @@ import difflib
 import re
 
 st.set_page_config(page_title="精油倉儲 Vibe", page_icon="🌿")
-st.title("🌿 精油入庫 (自動相容版)")
+st.title("🌿 精油入庫 (Next-Gen 辨識版)")
 
 # --- 步驟 0: 產品資料庫 ---
 KNOWN_PRODUCTS = [
@@ -25,22 +25,16 @@ else:
 
 @st.cache_data(ttl=600)
 def get_working_models():
-    """動態從 API 抓取目前帳號可用的模型清單，避免 404 錯誤"""
-    try:
-        # 呼叫 API 獲取可用模型
-        models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                # 排除掉某些不支援圖片的舊型號
-                if "gemini" in m.name.lower():
-                    models.append(m.name)
-        
-        # 排序：讓 flash 系列排在前面，因為它們比較快且額度較多
-        models.sort(key=lambda x: 'flash' not in x.lower())
-        return models
-    except Exception as e:
-        # 如果連 list_models 都失敗，回傳最基礎的備案
-        return ["models/gemini-1.5-flash", "models/gemini-pro-vision"]
+    """根據截圖提供的最新名單進行排序"""
+    # 這裡根據您的 Rate limits 截圖，手動指定最新的模型路徑
+    # 優先順序：Gemini 3 > Gemini 2.5 (新一代模型通常有較好的免費配額)
+    latest_models = [
+        "models/gemini-3-flash",
+        "models/gemini-2.5-flash",
+        "models/gemini-2.5-flash-lite",
+        "models/gemini-2.0-flash-exp" # 保留備案
+    ]
+    return latest_models
 
 def save_to_sheet(data_list):
     try:
@@ -102,9 +96,9 @@ def parse_side_label(text):
 # --- 3. 介面與辨識 ---
 st.sidebar.subheader("⚙️ 系統診斷")
 available_models = get_working_models()
-selected_model = st.sidebar.selectbox("當前使用模型 (已排除無效型號)", available_models, index=0)
+selected_model = st.sidebar.selectbox("選取最新模型", available_models, index=0)
 
-st.info("📌 上傳「正面」與「側面」照片。")
+st.info("📌 已更新至最新模型名單 (Gemini 3 / 2.5)。")
 uploaded_files = st.file_uploader("選取照片", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
 
 if 'edit_data' not in st.session_state:
@@ -119,7 +113,6 @@ if uploaded_files:
             st.warning("⚠️ 請上傳兩張照片。")
         else:
             try:
-                # 這裡使用動態抓取的 selected_model
                 model = genai.GenerativeModel(selected_model)
                 with st.spinner(f'正在使用 {selected_model} 辨識...'):
                     # 辨識正面
@@ -137,7 +130,7 @@ if uploaded_files:
                         f_data["price"], f_data["vol"],
                         s_data["expiry"], s_data["batch"]
                     ]
-                    st.success("辨識完成")
+                    st.success("辨識成功")
             except Exception as e:
                 st.error(f"辨識異常：{e}")
 
@@ -148,4 +141,18 @@ f1 = st.text_input("產品名稱", value=st.session_state.edit_data[0])
 is_known, suggestion = check_product_name(f1)
 if f1 and not is_known and suggestion:
     if st.button(f"💡 建議更正為：{suggestion}"):
-        st.session_state.edit_data
+        st.session_state.edit_data[0] = suggestion
+        st.rerun()
+
+f2 = st.text_input("售價", value=st.session_state.edit_data[1])
+f3 = st.text_input("容量", value=st.session_state.edit_data[2])
+f4 = st.text_input("保存期限 (YYYY-MM)", value=st.session_state.edit_data[3])
+f5 = st.text_input("Batch no.", value=st.session_state.edit_data[4])
+
+if st.button("✅ 正式入庫"):
+    if f1 and f1 != "辨識失敗":
+        if save_to_sheet([f1, f2, f3, f4, f5]):
+            st.balloons()
+            st.success(f"✅ {f1} 已入庫！")
+            st.session_state.edit_data = ["", "", "", "", ""]
+            st.rerun()
