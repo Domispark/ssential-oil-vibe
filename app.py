@@ -9,7 +9,7 @@ import difflib
 import re
 
 st.set_page_config(page_title="精油倉儲 Vibe", page_icon="🌿")
-st.title("🌿 精油入庫 (Next-Gen 辨識版)")
+st.title("🌿 精油入庫 (模型自動對齊版)")
 
 # --- 步驟 0: 產品資料庫 ---
 KNOWN_PRODUCTS = [
@@ -25,16 +25,29 @@ else:
 
 @st.cache_data(ttl=600)
 def get_working_models():
-    """根據截圖提供的最新名單進行排序"""
-    # 這裡根據您的 Rate limits 截圖，手動指定最新的模型路徑
-    # 優先順序：Gemini 3 > Gemini 2.5 (新一代模型通常有較好的免費配額)
-    latest_models = [
-        "models/gemini-3-flash",
-        "models/gemini-2.5-flash",
-        "models/gemini-2.5-flash-lite",
-        "models/gemini-2.0-flash-exp" # 保留備案
-    ]
-    return latest_models
+    """動態掃描 API 支援的所有模型名稱，徹底避開 404 錯誤"""
+    try:
+        available_names = []
+        for m in genai.list_models():
+            # 只選取支援 generateContent (圖片/文字生成) 的模型
+            if 'generateContent' in m.supported_generation_methods:
+                available_names.append(m.name)
+        
+        # 定義我們希望優先使用的模型關鍵字順序
+        # 根據您的截圖優先嘗試 3-flash, 2.5-flash, 1.5-flash
+        priority_keywords = ["3-flash", "2.5-flash", "1.5-flash", "2.0-flash"]
+        
+        sorted_models = []
+        for kw in priority_keywords:
+            for name in available_names:
+                if kw in name.lower() and name not in sorted_models:
+                    sorted_models.append(name)
+        
+        # 如果排序後的清單為空，則回傳原始清單或備案
+        return sorted_models if sorted_models else available_names
+    except Exception as e:
+        st.warning(f"無法自動獲取模型清單，將使用基礎備案。")
+        return ["models/gemini-1.5-flash", "models/gemini-2.0-flash-exp"]
 
 def save_to_sheet(data_list):
     try:
@@ -96,9 +109,9 @@ def parse_side_label(text):
 # --- 3. 介面與辨識 ---
 st.sidebar.subheader("⚙️ 系統診斷")
 available_models = get_working_models()
-selected_model = st.sidebar.selectbox("選取最新模型", available_models, index=0)
+selected_model = st.sidebar.selectbox("當前 API 支援的模型", available_models, index=0)
 
-st.info("📌 已更新至最新模型名單 (Gemini 3 / 2.5)。")
+st.info("📌 系統已動態偵測您的帳號權限，請從側邊欄選取一個非 429 報錯的模型進行測試。")
 uploaded_files = st.file_uploader("選取照片", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
 
 if 'edit_data' not in st.session_state:
@@ -115,12 +128,10 @@ if uploaded_files:
             try:
                 model = genai.GenerativeModel(selected_model)
                 with st.spinner(f'正在使用 {selected_model} 辨識...'):
-                    # 辨識正面
                     p1 = "OCR FRONT label. Find '品名', '$', and 'ML'. Output ALL text."
                     r1 = model.generate_content([p1, imgs[0]])
                     f_data = parse_front_label(r1.text)
                     
-                    # 辨識側面
                     p2 = "OCR SIDE label. Find 'Sell by date' and 'Batch no'. Output ALL text."
                     r2 = model.generate_content([p2, imgs[1]])
                     s_data = parse_side_label(r2.text)
@@ -145,14 +156,4 @@ if f1 and not is_known and suggestion:
         st.rerun()
 
 f2 = st.text_input("售價", value=st.session_state.edit_data[1])
-f3 = st.text_input("容量", value=st.session_state.edit_data[2])
-f4 = st.text_input("保存期限 (YYYY-MM)", value=st.session_state.edit_data[3])
-f5 = st.text_input("Batch no.", value=st.session_state.edit_data[4])
-
-if st.button("✅ 正式入庫"):
-    if f1 and f1 != "辨識失敗":
-        if save_to_sheet([f1, f2, f3, f4, f5]):
-            st.balloons()
-            st.success(f"✅ {f1} 已入庫！")
-            st.session_state.edit_data = ["", "", "", "", ""]
-            st.rerun()
+f3 = st.text_input("容量", value=st.session_state.
